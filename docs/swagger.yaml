@@ -1,0 +1,316 @@
+openapi: "3.0.0"
+info:
+  title: Salary Advance Loan Service API
+  description: |
+    Backend service for processing salary advance loan applications.
+
+    ## Authentication
+    All protected endpoints require a Bearer JWT token obtained from `POST /api/v1/auth/login`.
+
+    ## Roles
+    - **admin**: Full access to all endpoints
+    - **uploader**: Full access to all endpoints
+
+    ## Validation Logic
+    Customer records from `sample_customers.csv` are validated against the canonical `customers.json` list.
+    A record passes if:
+    1. The `account_no` exists in the canonical list (after padding with leading zeros to 13 digits).
+    2. The `customer_name` matches the canonical name (case-insensitive, whitespace-normalized).
+
+    Validation results are now processed and returned in **batches** of 10.
+
+    ## Rating Logic (1–10)
+    Scores are computed as a weighted sum of four factors:
+    | Factor | Weight |
+    |---|---|
+    | Transaction Count (max 50) | 25% |
+    | Total Transaction Volume (log-normalized) | 30% |
+    | Time Span (days between first & last tx, max 365) | 25% |
+    | Balance Stability (avg cleared balance / declared balance) | 20% |
+
+    | Score | Risk Label |
+    |---|---|
+    | 1–2 | Very High Risk |
+    | 3–4 | High Risk |
+    | 5–6 | Moderate Risk |
+    | 7–8 | Low Risk |
+    | 9–10 | Very Low Risk / Excellent |
+
+  version: "1.0.0"
+  contact:
+    name: OneTap Engineering
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development server
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          example: admin
+        password:
+          type: string
+          example: Admin@123
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        type:
+          type: string
+          example: Bearer
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "invalid credentials"
+
+    ValidationError:
+      type: object
+      properties:
+        field:
+          type: string
+          example: "customer_name"
+        message:
+          type: string
+          example: "name mismatch: got \"WRONG NAME\", expected \"ALICE\""
+
+    Customer:
+      type: object
+      properties:
+        id:          { type: integer, example: 1 }
+        customerName: { type: string, example: "ALICE EXAMPLE" }
+        mobile:      { type: string, example: "0911234567" }
+        accountNo:   { type: string, example: "1050001035901" }
+        branchName:  { type: string, example: "Finfinne Branch" }
+        productName: { type: string, example: "WADIAH STAFF SAVING" }
+        customerId:  { type: string, example: "10359" }
+        branchCode:  { type: string, example: "2" }
+        customerBalance: { type: number, example: 282180.89 }
+
+    ValidationRecord:
+      type: object
+      properties:
+        record_index:  { type: integer, example: 1 }
+        customer_name: { type: string }
+        account_no:    { type: string }
+        verified:      { type: boolean }
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/ValidationError"
+        normalized_record:
+          $ref: "#/components/schemas/Customer"
+
+    ValidationResult:
+      type: object
+      properties:
+        total:    { type: integer, example: 50 }
+        verified: { type: integer, example: 48 }
+        failed:   { type: integer, example: 2 }
+        batches:
+          type: array
+          items:
+            type: object
+            properties:
+              batch_number: { type: integer, example: 1 }
+              total:        { type: integer, example: 10 }
+              verified:     { type: integer, example: 10 }
+              failed:       { type: integer, example: 0 }
+              records:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ValidationRecord"
+
+    RatingResult:
+      type: object
+      properties:
+        account_no:        { type: string, example: "1050001047301" }
+        customer_name:     { type: string, example: "ALICE EXAMPLE" }
+        rating:            { type: integer, minimum: 1, maximum: 10, example: 7 }
+        description:       { type: string, example: "Low Risk" }
+        transaction_count: { type: integer, example: 12 }
+        total_volume:      { type: number, example: 125480.00 }
+        time_span_days:    { type: integer, example: 231 }
+        balance_stability: { type: number, example: 0.73 }
+
+paths:
+  /auth/login:
+    post:
+      summary: Login
+      description: Authenticate and receive a JWT token
+      tags: [Authentication]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Successful login
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /customers/validate:
+    get:
+      summary: Validate sample customers
+      description: |
+        Reads `sample_customers.csv`, validates each record against the canonical `customers.json`.
+        Account numbers are padded to 13 digits. The report groups and returns results in batches of 10.
+        All records (valid and invalid) are saved to the validation log.
+      tags: [Customers]
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Validation report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ValidationResult"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Internal error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /customers/verified:
+    get:
+      summary: Get verified customers
+      description: Returns all customer records that previously passed validation
+      tags: [Customers]
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: List of verified customers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  customers:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Customer"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /ratings:
+    get:
+      summary: Get all customer ratings
+      description: |
+        Computes loan risk ratings for all verified customers.
+        Call `/customers/validate` first to populate the verified store.
+      tags: [Ratings]
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: List of ratings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  ratings:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RatingResult"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: No verified customers found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /ratings/{accountNo}:
+    get:
+      summary: Get rating for a specific account
+      description: Computes and returns the loan risk rating for a single customer account
+      tags: [Ratings]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: accountNo
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "1050001047301"
+      responses:
+        "200":
+          description: Rating result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RatingResult"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Account not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
